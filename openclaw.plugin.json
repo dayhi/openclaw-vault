@@ -1,0 +1,26 @@
+{
+  "id": "openclaw-vault",
+  "name": "Secret Placeholder",
+  "description": "Hide secrets from AI with placeholder substitution in tool calls",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "secrets": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path to secrets JSON file (resolved via resolvePath)"
+          },
+          "autoRedact": {
+            "type": "boolean",
+            "description": "Auto-inject placeholder usage guide into system prompt",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}
