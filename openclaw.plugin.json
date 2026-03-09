@@ -1,7 +1,7 @@
 {
   "id": "openclaw-vault",
   "name": "Secret Placeholder",
-  "description": "Hide secrets from AI with placeholder substitution in tool calls",
+  "description": "Hide secrets from AI conversations with placeholder substitution at tool execution time",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

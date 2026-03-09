@@ -9,7 +9,7 @@ import { createResolvePlaceholderTool } from "./src/tools/resolve-placeholder.js
 const plugin = {
   id: "openclaw-vault",
   name: "Secret Placeholder",
-  description: "Hide secrets from AI with placeholder substitution in tool calls",
+  description: "Hide secrets from AI conversations with placeholder substitution at tool execution time",
 
   register(api: OpenClawPluginApi) {
     // Resolve secrets file path from plugin config or default to state dir
