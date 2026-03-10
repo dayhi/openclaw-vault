@@ -1,4 +1,4 @@
-import type { SecretStore } from "../secrets/secret-store.js";
+import { formatPlaceholder, normalizeSecretName, type SecretStore } from "../secrets/secret-store.js";
 
 export function createResolvePlaceholderTool(secretStore: SecretStore) {
   return {
@@ -18,16 +18,16 @@ export function createResolvePlaceholderTool(secretStore: SecretStore) {
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: { name: string }) => {
-      const normalized = params.name.toUpperCase().replace(/^\{\{|\}\}$/g, "");
+      const normalized = normalizeSecretName(params.name);
       const exists = secretStore.get(normalized) !== undefined;
-      const available = secretStore.listNames().map((n) => `{{${n}}}`);
+      const available = secretStore.listNames().map((name) => formatPlaceholder(name));
       return {
         content: JSON.stringify({
           exists,
           name: normalized,
           hint: exists
-            ? `Use {{${normalized}}} in tool parameters — the system will substitute the real value automatically.`
-            : `Placeholder {{${normalized}}} is not registered. Available: ${available.join(", ") || "(none)"}`,
+            ? `Use ${formatPlaceholder(normalized)} in tool parameters — the system will substitute the real value automatically.`
+            : `Placeholder ${formatPlaceholder(normalized)} is not registered. Available: ${available.join(", ") || "(none)"}`,
         }),
       };
     },

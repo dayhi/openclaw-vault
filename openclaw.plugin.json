@@ -1,7 +1,7 @@
 {
   "id": "openclaw-vault",
   "name": "Secret Placeholder",
-  "description": "Hide secrets from AI conversations with placeholder substitution at tool execution time",
+  "description": "Hard-masking secret management: AI never sees real values. Secrets are auto-redacted in all messages before reaching the model, restored at tool execution time, and optionally revealed in user-facing output.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -12,11 +12,16 @@
         "properties": {
           "file": {
             "type": "string",
-            "description": "Path to secrets JSON file (resolved via resolvePath)"
+            "description": "Path to the secrets JSON file (resolved via resolvePath)"
           },
-          "autoRedact": {
+          "enableContextRedaction": {
             "type": "boolean",
-            "description": "Auto-inject placeholder usage guide into system prompt",
+            "description": "Redact all secret values in messages before they reach the AI model (before_prompt_build).",
+            "default": true
+          },
+          "enableOutputSubstitution": {
+            "type": "boolean",
+            "description": "Substitute {{NAME}} placeholders back to real values in outbound messages to the user (message_sending).",
             "default": true
           }
         }

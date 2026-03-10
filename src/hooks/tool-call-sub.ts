@@ -7,7 +7,7 @@ export function toolCallSubHandler(secretStore: SecretStore, logger: Logger) {
     if (secretStore.size === 0) return;
     const { result, changed } = secretStore.deepSubstitute(event.params);
     if (changed) {
-      logger.info?.(`secret-placeholder: substituted placeholders in ${event.toolName} params`);
+      logger.info?.(`secret-placeholder: substituted placeholders at tool execution for ${event.toolName}`);
       return { params: result as Record<string, unknown> };
     }
   };

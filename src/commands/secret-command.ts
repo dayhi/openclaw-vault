@@ -1,4 +1,4 @@
-import type { SecretStore } from "../secrets/secret-store.js";
+import { formatPlaceholder, normalizeSecretName, type SecretStore } from "../secrets/secret-store.js";
 
 export function secretCommandHandler(secretStore: SecretStore) {
   return async (ctx: { args?: string }) => {
@@ -14,8 +14,9 @@ export function secretCommandHandler(secretStore: SecretStore) {
       if (!name || !value) {
         return { text: "Usage: /secret add <NAME> <value>" };
       }
-      secretStore.set(name, value);
-      return { text: `Registered secret {{${name.toUpperCase()}}}` };
+      const normalizedName = normalizeSecretName(name);
+      secretStore.set(normalizedName, value);
+      return { text: `Registered secret ${formatPlaceholder(normalizedName)}` };
     }
 
     if (action === "remove" || action === "delete" || action === "rm") {
@@ -23,11 +24,12 @@ export function secretCommandHandler(secretStore: SecretStore) {
       if (!name) {
         return { text: "Usage: /secret remove <NAME>" };
       }
-      const deleted = secretStore.delete(name);
+      const normalizedName = normalizeSecretName(name);
+      const deleted = secretStore.delete(normalizedName);
       return {
         text: deleted
-          ? `Removed secret {{${name.toUpperCase()}}}`
-          : `Secret "${name.toUpperCase()}" not found`,
+          ? `Removed secret ${formatPlaceholder(normalizedName)}`
+          : `Secret "${normalizedName}" not found`,
       };
     }
 
@@ -36,7 +38,7 @@ export function secretCommandHandler(secretStore: SecretStore) {
       if (names.length === 0) {
         return { text: "No secrets registered." };
       }
-      const formatted = names.map((n) => `{{${n}}}`).join(", ");
+      const formatted = names.map((name) => formatPlaceholder(name)).join(", ");
       return { text: `Registered placeholders (${names.length}): ${formatted}` };
     }
 
