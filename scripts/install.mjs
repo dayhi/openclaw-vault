@@ -1,45 +1,62 @@
 #!/usr/bin/env node
 
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 
 const PLUGIN_ID = "openclaw-vault";
-const DEFAULT_REPO = "openclaw/openclaw";
-const DEFAULT_REF = "main";
-const RELEASE_REPO = process.env.OPENCLAW_VAULT_REPO || DEFAULT_REPO;
-const RELEASE_REF = process.env.OPENCLAW_VAULT_REF || DEFAULT_REF;
-const ARCHIVE_URL =
-  process.env.OPENCLAW_VAULT_ARCHIVE_URL ||
-  `https://github.com/${RELEASE_REPO}/archive/${RELEASE_REF}.tar.gz`;
-const PLUGIN_SUBDIR = "extensions/openclaw-vault";
+const DEFAULT_REPO = "dayhi/openclaw-vault";
+const DEFAULT_PLUGIN_SUBDIR = ".";
+
+function readOptionValue(argv, index, optionName) {
+  const value = argv[index];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`Missing value for ${optionName}`);
+  }
+  return value;
+}
+
+function normalizePluginSubdir(pluginSubdir) {
+  const segments = pluginSubdir
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((segment) => segment && segment !== ".");
+
+  return segments.length === 0 ? "." : segments.join("/");
+}
 
 function parseArgs(argv) {
   const options = {
-    archiveUrl: ARCHIVE_URL,
-    pluginSubdir: PLUGIN_SUBDIR,
-    repo: RELEASE_REPO,
-    ref: RELEASE_REF,
+    archiveUrl: process.env.OPENCLAW_VAULT_ARCHIVE_URL || null,
+    pluginSubdir: DEFAULT_PLUGIN_SUBDIR,
+    repo: process.env.OPENCLAW_VAULT_REPO || DEFAULT_REPO,
+    ref: process.env.OPENCLAW_VAULT_REF || null,
     restartGateway: true,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--archive-url") {
-      options.archiveUrl = argv[++index];
+      options.archiveUrl = readOptionValue(argv, index + 1, arg);
+      index += 1;
       continue;
     }
     if (arg === "--plugin-subdir") {
-      options.pluginSubdir = argv[++index];
+      options.pluginSubdir = readOptionValue(argv, index + 1, arg);
+      index += 1;
       continue;
     }
     if (arg === "--repo") {
-      options.repo = argv[++index];
+      options.repo = readOptionValue(argv, index + 1, arg);
+      index += 1;
       continue;
     }
     if (arg === "--ref") {
-      options.ref = argv[++index];
+      options.ref = readOptionValue(argv, index + 1, arg);
+      index += 1;
       continue;
     }
     if (arg === "--no-restart") {
@@ -49,10 +66,11 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  if (!options.archiveUrl || !options.pluginSubdir) {
+  if (!options.pluginSubdir || (!options.archiveUrl && !options.repo)) {
     throw new Error("Missing install source options.");
   }
 
+  options.pluginSubdir = normalizePluginSubdir(options.pluginSubdir);
   return options;
 }
 
@@ -119,6 +137,120 @@ async function readJsonCommand(command, args) {
   }
 }
 
+function requestJson(url) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "openclaw-vault-installer",
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          const body = chunks.join("");
+          let payload = null;
+
+          if (body) {
+            try {
+              payload = JSON.parse(body);
+            } catch {
+              reject(new Error(`Failed to parse JSON from ${url}: ${body}`));
+              return;
+            }
+          }
+
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            payload,
+          });
+        });
+      },
+    );
+
+    request.on("error", reject);
+    request.setTimeout(30000, () => {
+      request.destroy(new Error(`Request timed out: ${url}`));
+    });
+  });
+}
+
+function buildArchiveUrl(repo, ref) {
+  return `https://github.com/${repo}/archive/${ref}.tar.gz`;
+}
+
+async function resolveLatestReleaseTag(repo) {
+  const releaseUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+  const response = await requestJson(releaseUrl);
+
+  if (response.statusCode === 404) {
+    throw new Error(
+      `No GitHub release found for ${repo}. Publish the first release before using the default installer, or install unpublished code explicitly with --ref main.`,
+    );
+  }
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const details = response.payload?.message ? ` ${response.payload.message}` : "";
+    throw new Error(`Failed to resolve latest release for ${repo} (HTTP ${response.statusCode}).${details}`);
+  }
+
+  const tag = response.payload?.tag_name;
+  if (!tag) {
+    throw new Error(`Latest release response for ${repo} did not include tag_name.`);
+  }
+
+  return tag;
+}
+
+async function resolveInstallSource(options) {
+  if (options.archiveUrl) {
+    return {
+      archiveUrl: options.archiveUrl,
+      repo: null,
+      ref: null,
+      sourceType: "archive-url",
+    };
+  }
+
+  if (options.ref) {
+    return {
+      archiveUrl: buildArchiveUrl(options.repo, options.ref),
+      repo: options.repo,
+      ref: options.ref,
+      sourceType: "ref",
+    };
+  }
+
+  const releaseTag = await resolveLatestReleaseTag(options.repo);
+  return {
+    archiveUrl: buildArchiveUrl(options.repo, releaseTag),
+    repo: options.repo,
+    ref: releaseTag,
+    sourceType: "latest-release",
+  };
+}
+
+function logInstallSource(options, source) {
+  if (source.sourceType === "latest-release") {
+    console.log(`[vault] Install source: latest release`);
+  } else if (source.sourceType === "ref") {
+    console.log(`[vault] Install source: explicit ref/tag`);
+  } else {
+    console.log(`[vault] Install source: explicit archive URL`);
+  }
+
+  console.log(`[vault] Repository: ${source.repo ?? "(custom archive URL)"}`);
+  console.log(`[vault] Ref/tag: ${source.ref ?? "(custom archive URL)"}`);
+  console.log(`[vault] Archive URL: ${source.archiveUrl}`);
+  console.log(`[vault] Plugin subdir: ${options.pluginSubdir}`);
+}
+
 async function detectExistingInstallPath() {
   try {
     const payload = await readJsonCommand("openclaw", ["plugins", "list", "--json"]);
@@ -168,29 +300,52 @@ async function downloadArchive(outputPath, url) {
   throw new Error("Neither curl nor PowerShell is available for downloading the archive.");
 }
 
-async function extractTarGz(archivePath, destinationDir) {
+async function resolveTarCommand() {
+  if (isWindows()) {
+    const systemTar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+    try {
+      await access(systemTar, fsConstants.F_OK);
+      return systemTar;
+    } catch {
+    }
+  }
+
   if (!(await commandExists("tar"))) {
     throw new Error("tar is required to extract the downloaded archive.");
   }
-  await execCommand("tar", ["-xzf", archivePath, "-C", destinationDir]);
+  return "tar";
+}
+
+async function extractTarGz(archivePath, destinationDir) {
+  const tarCommand = await resolveTarCommand();
+  await execCommand(tarCommand, ["-xzf", archivePath, "-C", destinationDir]);
+}
+
+async function directoryContainsPluginManifest(directory) {
+  try {
+    await access(path.join(directory, "openclaw.plugin.json"), fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function findPluginDir(rootDir, pluginSubdir) {
   const entries = await readdir(rootDir, { withFileTypes: true });
+  const relativeSegments = pluginSubdir === "." ? [] : pluginSubdir.split("/");
+
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       continue;
     }
-    const candidate = path.join(rootDir, entry.name, ...pluginSubdir.split("/"));
-    try {
-      const nested = await readdir(candidate);
-      if (nested.length >= 0) {
-        return candidate;
-      }
-    } catch {
+
+    const candidate = path.join(rootDir, entry.name, ...relativeSegments);
+    if (await directoryContainsPluginManifest(candidate)) {
+      return candidate;
     }
   }
-  throw new Error(`Could not locate plugin directory \"${pluginSubdir}\" in extracted archive.`);
+
+  throw new Error(`Could not locate plugin directory "${pluginSubdir}" in extracted archive.`);
 }
 
 async function maybeRestartGateway() {
@@ -228,12 +383,15 @@ async function main() {
     throw new Error("OpenClaw CLI is required. Please install/configure OpenClaw first.");
   }
 
+  const installSource = await resolveInstallSource(options);
+  logInstallSource(options, installSource);
+
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-vault-install-"));
   const archivePath = path.join(tempDir, "openclaw-vault.tar.gz");
 
   try {
-    console.log(`[vault] Downloading ${options.archiveUrl}`);
-    await downloadArchive(archivePath, options.archiveUrl);
+    console.log(`[vault] Downloading ${installSource.archiveUrl}`);
+    await downloadArchive(archivePath, installSource.archiveUrl);
 
     console.log("[vault] Extracting archive");
     await extractTarGz(archivePath, tempDir);

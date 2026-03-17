@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_URL="${OPENCLAW_VAULT_INSTALLER_URL:-https://raw.githubusercontent.com/openclaw/openclaw/main/extensions/openclaw-vault/scripts/install.mjs}"
+SCRIPT_URL="${OPENCLAW_VAULT_INSTALLER_URL:-https://raw.githubusercontent.com/dayhi/openclaw-vault/main/scripts/install.mjs}"
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t openclaw-vault)"
 TMP_FILE="$TMP_DIR/install.mjs"
 

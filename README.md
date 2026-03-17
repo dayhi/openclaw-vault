@@ -70,24 +70,27 @@ OpenClaw ──请求──▶ Vault 本地代理（127.0.0.1:19100）
 #### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dayhi/openclaw-vault/main/extensions/openclaw-vault/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/dayhi/openclaw-vault/main/scripts/install.sh | sh
 ```
 
 #### Windows PowerShell
 
 ```powershell
-irm https://raw.githubusercontent.com/dayhi/openclaw-vault/main/extensions/openclaw-vault/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/dayhi/openclaw-vault/main/scripts/install.ps1 | iex
 ```
 
 安装器会自动完成：
 
-1. 下载当前仓库源码归档
-2. 提取 `extensions/openclaw-vault`
-3. 执行 `openclaw plugins install`
-4. 自动启用 `openclaw-vault`
-5. 执行 `openclaw vault setup`
-6. 重启 OpenClaw Gateway
+1. 默认解析 `dayhi/openclaw-vault` 的 latest release
+2. 下载该 release tag 对应的源码归档
+3. 提取仓库根目录中的插件
+4. 执行 `openclaw plugins install`
+5. 自动启用 `openclaw-vault`
+6. 执行 `openclaw vault setup`
+7. 重启 OpenClaw Gateway
 
+> 如果仓库尚未发布任何 release，默认一键安装会直接报错，不会回退到 `main`。此时请先发布首个 release，或临时显式执行 `node scripts/install.mjs --ref main` 安装未发布代码。
+>
 > 如果你想只安装但暂不重启，可给 Node 安装器追加 `--no-restart`。
 
 ### 仓库内手动安装
@@ -95,13 +98,13 @@ irm https://raw.githubusercontent.com/dayhi/openclaw-vault/main/extensions/openc
 如果你已经把整个仓库 clone 到本地，可以直接安装当前工作树里的插件目录：
 
 ```bash
-openclaw plugins install ./extensions/openclaw-vault
+openclaw plugins install .
 ```
 
 或在 Windows PowerShell 中：
 
 ```powershell
-openclaw plugins install .\extensions\openclaw-vault
+openclaw plugins install .
 ```
 
 安装完成后，执行：
@@ -115,13 +118,15 @@ openclaw gateway restart
 
 ### 更新到最新版本
 
-如果你是通过 GitHub 一键安装的，直接重新执行同一条安装命令即可；安装器会先卸载已有安装，再安装最新版本。
+如果你是通过 GitHub 一键安装的，直接重新执行同一条安装命令即可；安装器会先卸载已有安装，再安装最新 release。
+
+如果你想安装尚未发布的仓库代码，请显式执行 `node scripts/install.mjs --ref main`。
 
 如果你是从本地仓库目录安装的，也可以在更新仓库后重新执行：
 
 ```bash
 openclaw plugins uninstall openclaw-vault --force
-openclaw plugins install ./extensions/openclaw-vault
+openclaw plugins install .
 openclaw vault setup
 openclaw gateway restart
 ```

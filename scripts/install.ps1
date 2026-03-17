@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $scriptUrl = if ($env:OPENCLAW_VAULT_INSTALLER_URL) {
   $env:OPENCLAW_VAULT_INSTALLER_URL
 } else {
-  "https://raw.githubusercontent.com/openclaw/openclaw/main/extensions/openclaw-vault/scripts/install.mjs"
+  "https://raw.githubusercontent.com/dayhi/openclaw-vault/main/scripts/install.mjs"
 }
 
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("openclaw-vault-" + [guid]::NewGuid().ToString("N"))
