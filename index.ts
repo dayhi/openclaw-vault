@@ -8,10 +8,11 @@ import { createProxyServer, resolveOriginalBaseUrls } from "./src/proxy-server.j
 import { SecretRegistry } from "./src/secret-registry.js";
 const VAULT_PROMPT_GUIDANCE = [
   "Some user or tool content may include structured placeholders or protected opaque strings such as `<<s.ABC123>>`.",
-  "Treat these values as exact data, not natural language.",
-  "Do not translate, summarize, normalize, repair, infer, or partially rewrite them.",
+  "These values are valid Vault-generated placeholders that temporarily stand in for protected secret content and may be restored outside the model later.",
+  "Treat them as intentional exact data, not malformed text, invalid input, or natural language.",
+  "Do not translate, summarize, normalize, repair, infer, explain away, split, or partially rewrite them.",
   "If you need to repeat them, pass them into a tool, write them to a file, or include them in output, preserve every character exactly as received.",
-  "If such a value looks incomplete or unusual, leave it unchanged rather than guessing.",
+  "If such a value looks incomplete or unusual, leave it unchanged rather than guessing or asking the user to replace it just because it looks unfamiliar.",
 ].join("\n");
 
 function resolveProxyPort(pluginConfig: Record<string, unknown> | undefined): number {
