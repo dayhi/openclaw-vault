@@ -1,11 +1,8 @@
 {
-  "name": "openclaw-vault",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@openclaw/openclaw-vault",
+  "version": "1.0.0",
+  "description": "OpenClaw Vault plugin",
   "type": "module",
-  "devDependencies": {
-    "openclaw": "*"
-  },
   "openclaw": {
     "extensions": [
       "./index.ts"

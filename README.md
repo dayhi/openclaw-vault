@@ -1,417 +1,308 @@
-# openclaw-vault
+# OpenClaw Vault
 
-> **硬遮蔽**秘密管理插件 — AI **永远无法看到**真实秘密值。
+OpenClaw Vault 是 OpenClaw 的插件，为 AI Provider 流量提供**本地透明代理**。
 
-[English](./README_EN.md)
+核心目标：在请求发往 AI Provider 前，把敏感内容替换成随机临时 token；在 Provider 响应返回后，再把 token 还原回原文。整个过程对用户和 AI 模型透明，**敏感原文不会出现在上游请求中**。
 
-`openclaw-vault` 是 [OpenClaw](https://github.com/nicepkg/openclaw) 的安全插件。它在架构层面保证 AI 模型只能看到 `{{NAME}}` 占位符，真实值仅在工具实际执行时注入，执行结果在回流给 AI 前自动脱敏，发送给用户时自动还原。
+---
 
-## 核心特性
+## 功能效果
 
-- **硬遮蔽架构** — 所有消息在送入 AI 前自动替换真实值为 `{{NAME}}`，AI 物理上无法接触明文
-- **工具执行时自动还原** — `before_tool_call` 阶段将 `{{NAME}}` 替换为真实值，工具收到的是明文
-- **工具结果自动脱敏** — 工具返回的内容在持久化前自动将真实值替换回 `{{NAME}}`
-- **JSONL 安全网** — `before_message_write` 确保写入会话历史文件的内容绝不含真实值
-- **用户展示自动还原** — `message_sending` 阶段将 `{{NAME}}` 替换为真实值，用户看到的是明文
-- **Vault 标记协议** — 外部工具可通过 `<<VAULT:NAME=VALUE>>` 标记注册秘密，零暴露
-- **`/secret` 命令** — 交互式管理秘密：增删查清
-- **`resolve_placeholder` 工具** — AI 可查询占位符是否存在，不暴露真实值
-- **跨会话持久化** — 秘密存储在本地 JSON 文件，重启后自动加载
-- **零运行时依赖** — 纯 Node.js 实现，无需安装额外包
+### 请求侧脱敏
 
-## 兼容性
+- **inline 密文**：输入中的 `<<s:原文>>` 会被替换为 `<<s.随机6位字母数字>>` 格式的临时 token
+- **已登记密文**：通过 `/s add` 注册的密文值，只要出现在请求体中就会被自动替换（按长度倒序匹配，避免短值误切长值）
 
-| 要求 | 版本 |
-|------|------|
-| OpenClaw | `>=v2026.3.8`（需支持 `before_prompt_build`、`before_tool_call`、`tool_result_persist`、`before_message_write`、`message_sending` 钩子） |
-| Node.js | `>=18` |
+### 响应侧还原
 
-## 安装
+- **普通 HTTP 响应**：整包读取后统一还原，自动重算 `content-length`
+- **SSE 流式响应**：按完整 SSE block 逐块还原，支持 OpenAI Responses 和 Anthropic Messages 等常见 SSE delta 协议；内置跨 chunk token 拼接，不会吐出半截 token
 
-```bash
-# 1. 克隆到 OpenClaw 扩展目录
-git clone https://github.com/nicepkg/openclaw-vault.git ~/.openclaw/extensions/openclaw-vault
+### 会话隔离
 
-# 2. 确认插件已被发现
-openclaw plugins list
+- 每次请求创建独立的 token 映射表
+- 响应结束后（无论成功或失败）立即清空，不跨请求复用
 
-# 3. 启用插件
-openclaw plugins enable openclaw-vault
-```
+### Provider 自动接管
 
-或手动将项目文件夹放到 `~/.openclaw/extensions/openclaw-vault/` 下即可。
+- `/s check` 自动把目标 provider 的 `baseUrl` 改写为本地代理地址（默认 `127.0.0.1:19100`）
+- 同时将真实上游 URL 备份到配置和状态文件，后续代理据此转发
 
-## 快速开始
+### 密文注册表
 
-### 1. 注册秘密
+- 支持 `add` / `update` / `remove` / `list` 管理已登记密文
+- 列表只展示名称、长度和 SHA-256 摘要前 12 位，不显示明文
 
-```bash
-/secret add API_KEY sk-abcdef1234567890
-/secret add DB_PASSWORD hunter2
-/secret add SSH_HOST 192.168.1.100
-```
-
-- 名称自动规范化为大写
-- 名称后的所有内容都作为 value（支持包含空格的值）
-- 占位符统一格式：`{{NAME}}`
-
-### 2. 管理秘密
-
-```bash
-/secret list              # 仅显示占位符名称，不显示真实值
-/secret remove API_KEY    # 删除单个秘密
-/secret clear             # 清空全部秘密
-```
-
-### 3. 在对话中使用
-
-注册后直接在对话中使用即可：
-
-```
-User: 用 {{API_KEY}} 调用 OpenAI 的 models 接口
-```
-
-AI 全程只看到占位符：
-
-```
-AI: 好的，我来调用 API。
-    curl -H "Authorization: Bearer {{API_KEY}}" https://api.openai.com/v1/models
-```
-
-工具实际执行时自动替换为真实值：
-
-```
-实际执行: curl -H "Authorization: Bearer sk-abcdef1234567890" https://api.openai.com/v1/models
-```
-
-工具返回结果在回流给 AI 前自动脱敏：
-
-```
-工具返回: {"api_key": "sk-abcdef1234567890", ...}
-AI 看到:  {"api_key": "{{API_KEY}}", ...}
-```
-
-发送给用户时自动还原：
-
-```
-AI 内部: 调用结果中 api_key 为 {{API_KEY}}
-用户看到: 调用结果中 api_key 为 sk-abcdef1234567890
-```
-
-### 4. Vault 标记（外部工具注册秘密）
-
-外部工具可以在返回文本中嵌入特殊标记来注册新秘密：
-
-```
-工具返回: 已获取 token <<VAULT:ACCESS_TOKEN=eyJhbGciOiJIUzI1NiJ9.xxx>>，可以使用了
-```
-
-插件会自动：
-1. 提取 `<<VAULT:ACCESS_TOKEN=eyJhbGciOiJIUzI1NiJ9.xxx>>` 标记
-2. 注册 `ACCESS_TOKEN` 到秘密存储
-3. 将标记从文本中移除
-4. 后续所有出现该值的地方自动替换为 `{{ACCESS_TOKEN}}`
-
-AI 最终看到的只是：
-
-```
-已获取 token ，可以使用了
-```
+---
 
 ## 工作原理
 
-### 数据流
-
+```text
+OpenClaw ──请求──▶ Vault 本地代理（127.0.0.1:19100）
+                       │
+                  ① 读取请求体，替换 <<s:原文>> 和已登记密文为临时 token
+                       │
+                  ② 将脱敏后的请求转发到真实 AI Provider
+                       │
+                  ③ 收到响应，按本次 token 映射表还原所有 token
+                       │
+                  ④ 还原后的响应返回给 OpenClaw
+                       │
+                  ⑤ 立即丢弃本次请求的所有映射关系
 ```
-用户输入
-  ↓
-before_message_write（同步）→ 遮蔽真实值 → 写入 JSONL
-  ↓
-before_prompt_build → 原地遮蔽 messages[]（兜底）→ 注入可用占位符列表
-  ↓
-AI 只看到 {{NAME}} 占位符
-  ↓
-before_tool_call → {{NAME}} → 真实值
-  ↓
-工具执行（使用真实值）
-  ↓
-tool_result_persist（同步）→ 提取 <<VAULT:...>> 标记 + 遮蔽结果
-  ↓
-before_message_write（同步）→ 再次遮蔽（安全网）
-  ↓
-AI 在结果中只看到 {{NAME}}
-  ↓
-message_sending → {{NAME}} → 真实值展示给用户
-```
-
-### 钩子一览
-
-| 钩子 | 文件 | 同步/异步 | 作用 |
-|------|------|-----------|------|
-| `before_prompt_build` | `context-redact.ts` | 异步 | 遍历所有消息，原地遮蔽真实值；注入可用占位符列表 |
-| `before_tool_call` | `tool-call-sub.ts` | 异步 | 将工具参数中的 `{{NAME}}` 替换为真实值 |
-| `tool_result_persist` | `tool-result-redact.ts` | **同步** | 提取 Vault 标记 → 批量注册 → 遮蔽工具结果 |
-| `before_message_write` | `message-write-redact.ts` | **同步** | 安全网：确保 JSONL 不含真实值 |
-| `message_sending` | `message-sending-sub.ts` | 异步 | 将 `{{NAME}}` 还原为真实值展示给用户 |
-
-### 两种秘密注册方式
-
-**方式 1：`/secret` 命令（手动注册）**
-
-```bash
-/secret add MY_TOKEN abc123
-```
-
-通过闭包直接调用 `SecretStore.set()`，值不经过 AI，零暴露。
-
-**方式 2：Vault 标记（工具自动注册）**
-
-外部工具在返回文本中嵌入 `<<VAULT:NAME=VALUE>>` 标记，由 `tool_result_persist` 钩子提取并注册。标记会从文本中移除，值不会被 AI 看到。
-
-标记格式：
-```
-<<VAULT:SECRET_NAME=secret_value_here>>
-```
-
-规则：
-- 名称必须以大写字母或下划线开头，只能包含大写字母、数字和下划线
-- 值支持任意字符（包括换行），以最短匹配 `>>` 结束
-- 单条文本中可包含多个标记
-
-## 现有 Skill 适配指南
-
-根据 skill 与本插件的关系，有两种适配方式可选：
-
-### 方式 A：闭包直接注册（插件内部工具）
-
-如果你的 skill 是在本插件的 `index.ts` 中通过 `api.registerTool()` 注册的，那么工具工厂函数可以直接接收 `secretStore` 实例，通过闭包调用 `secretStore.set()` 注册秘密。**真实值完全不经过 AI，零暴露。**
-
-这就是 `/secret` 命令的工作方式——它在 `execute` 内部直接调用 `secretStore.set()`，AI 从头到尾看不到任何明文。
-
-**示例：在插件内新增一个获取 OAuth Token 的工具**
-
-`src/tools/fetch-oauth-token.ts`：
-
-```typescript
-import type { SecretStore } from "../secrets/secret-store.js";
-
-export function createFetchOAuthTokenTool(secretStore: SecretStore) {
-  return {
-    name: "fetch_oauth_token",
-    label: "Fetch OAuth Token",
-    description: "Fetch an OAuth token and register it as {{OAUTH_TOKEN}}.",
-    parameters: {
-      type: "object" as const,
-      properties: {
-        clientId: { type: "string" as const, description: "OAuth client ID" },
-        clientSecret: { type: "string" as const, description: "OAuth client secret (use {{NAME}} placeholder)" },
-      },
-      required: ["clientId", "clientSecret"] as const,
-    },
-    // params 中的 {{NAME}} 会被 before_tool_call 自动替换为真实值
-    execute: async (_toolCallId: string, params: { clientId: string; clientSecret: string }) => {
-      const token = await fetchTokenFromProvider(params.clientId, params.clientSecret);
-
-      // 通过闭包直接注册，AI 永远看不到 token 明文
-      secretStore.set("OAUTH_TOKEN", token);
-
-      return {
-        content: "OAuth token 已获取并注册为 {{OAUTH_TOKEN}}，后续可直接使用该占位符。",
-      };
-    },
-  };
-}
-```
-
-在 `index.ts` 中注册：
-
-```typescript
-import { createFetchOAuthTokenTool } from "./src/tools/fetch-oauth-token.js";
-
-// 在 register() 中：
-api.registerTool(createFetchOAuthTokenTool(secretStore));
-```
-
-> **关键点**：`secretStore.set()` 在工具的 `execute` 函数内直接调用，真实值只存在于 JS 运行时的变量中，永远不会出现在 AI 可见的任何文本里。
-
-### 方式 B：Vault 标记（外部工具/第三方 Skill）
-
-如果你的 skill 是独立插件或外部工具，无法直接访问 `secretStore` 实例，可以在返回文本中嵌入 `<<VAULT:NAME=VALUE>>` 标记。`tool_result_persist` 钩子会自动提取标记、注册秘密并从文本中移除标记。
-
-**适配原则**
-
-1. **skill 返回的敏感信息** — 用 `<<VAULT:NAME=VALUE>>` 包裹
-2. **skill 接收的敏感参数** — 直接使用 `{{NAME}}` 占位符，插件会在执行前自动替换
-3. **skill 内部逻辑** — 无需改动，照常处理明文
 
 **示例**
 
-改造前（直接返回敏感值）：
+| 阶段 | 内容 |
+|------|------|
+| 用户输入 | `<<s:我的密码123>>` |
+| AI 上游看到 | `<<s.aB3xZ9>>` |
+| 用户最终看到 | `<<s:我的密码123>>` |
 
-```typescript
-async function getOAuthToken() {
-  const token = await fetchToken();
-  return { content: `获取到访问令牌: ${token}` };
-}
+---
+
+## 安装方式
+
+### GitHub 一键安装
+
+> 前提：你已经安装并初始化过 `openclaw` CLI，且本机可执行 `node` 与 `openclaw`。
+
+#### macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dayhi/openclaw-vault/main/extensions/openclaw-vault/scripts/install.sh | sh
 ```
 
-改造后（使用 Vault 标记）：
+#### Windows PowerShell
 
-```typescript
-async function getOAuthToken() {
-  const token = await fetchToken();
-  return { content: `获取到访问令牌: <<VAULT:OAUTH_TOKEN=${token}>>，后续请使用 {{OAUTH_TOKEN}}` };
-}
+```powershell
+irm https://raw.githubusercontent.com/dayhi/openclaw-vault/main/extensions/openclaw-vault/scripts/install.ps1 | iex
 ```
 
-改造后，插件会自动将 token 注册为秘密，AI 后续只能看到 `{{OAUTH_TOKEN}}`。
+安装器会自动完成：
 
-### 两种方式对比
+1. 下载当前仓库源码归档
+2. 提取 `extensions/openclaw-vault`
+3. 执行 `openclaw plugins install`
+4. 自动启用 `openclaw-vault`
+5. 执行 `openclaw vault setup`
+6. 重启 OpenClaw Gateway
 
-| 对比项 | 方式 A（闭包直接注册） | 方式 B（Vault 标记） |
-|--------|----------------------|---------------------|
-| 适用场景 | 本插件内注册的工具 | 外部插件 / 第三方 Skill |
-| 安全性 | 真实值只在 JS 变量中，AI 完全不可见 | 标记在 `tool_result_persist` 阶段提取并移除，AI 不可见 |
-| 改造成本 | 需要导入 `SecretStore` 类型，接收实例 | 只需修改返回文本格式 |
-| 返回给 AI 的内容 | 自定义文本（不含真实值） | 标记被移除后的文本 |
+> 如果你想只安装但暂不重启，可给 Node 安装器追加 `--no-restart`。
 
-### AI 辅助改造提示词
+### 仓库内手动安装
 
-如果你的 skill 代码较多，可以用以下提示词让 AI 帮你改造。
+如果你已经把整个仓库 clone 到本地，可以直接安装当前工作树里的插件目录：
 
-**针对方式 A（闭包直接注册）的提示词：**
-
-```text
-请帮我改造以下工具代码，使其适配 openclaw-vault 插件的硬遮蔽架构（闭包方式）。
-
-改造规则：
-1. 工具的工厂函数需要接收 SecretStore 实例作为参数
-2. 在 execute 函数内部，获取到敏感值后直接调用 secretStore.set("NAME", value) 注册
-3. 返回给 AI 的文本中只包含 {{NAME}} 占位符，绝不包含真实值
-4. 如果工具接收敏感参数，参数描述中说明使用 {{NAME}} 占位符（插件会在执行时自动替换）
-5. 工具内部的业务逻辑不需要改动
-
-示例：
-  改造前:
-    return { content: `Token: ${token}` }
-  改造后:
-    secretStore.set("ACCESS_TOKEN", token);
-    return { content: "Token 已注册为 {{ACCESS_TOKEN}}" }
-
-以下是需要改造的代码：
-
-[粘贴你的工具代码]
+```bash
+openclaw plugins install ./extensions/openclaw-vault
 ```
 
-**针对方式 B（Vault 标记）的提示词：**
+或在 Windows PowerShell 中：
 
-```text
-请帮我改造以下 skill 代码，使其适配 openclaw-vault 插件的硬遮蔽架构（Vault 标记方式）。
-
-改造规则：
-1. 找出所有返回敏感信息（API key、token、密码、密钥、证书等）的位置
-2. 将敏感值用 <<VAULT:NAME=VALUE>> 标记包裹，其中：
-   - NAME 是大写字母加下划线的描述性名称（如 OAUTH_TOKEN、API_KEY、DB_PASSWORD）
-   - VALUE 是实际的敏感值
-3. 在返回文本中引导后续使用占位符格式 {{NAME}}
-4. 如果 skill 接收敏感参数，改为接收 {{NAME}} 占位符（插件会在执行时自动替换为真实值）
-5. skill 内部处理逻辑不需要改动
-6. 不要改动非敏感信息的返回方式
-
-示例：
-  改造前: return { content: `Token: ${token}` }
-  改造后: return { content: `Token: <<VAULT:ACCESS_TOKEN=${token}>>，后续请使用 {{ACCESS_TOKEN}}` }
-
-以下是需要改造的代码：
-
-[粘贴你的 skill 代码]
+```powershell
+openclaw plugins install .\extensions\openclaw-vault
 ```
 
-## 配置
+安装完成后，执行：
 
-在 OpenClaw 配置文件中可以自定义插件行为：
+```bash
+openclaw vault setup
+openclaw gateway restart
+```
 
-```json
+如果 `openclaw vault setup` 写回了 provider 配置，建议再重启一次 Gateway，确保新的 `baseUrl` 生效。
+
+### 更新到最新版本
+
+如果你是通过 GitHub 一键安装的，直接重新执行同一条安装命令即可；安装器会先卸载已有安装，再安装最新版本。
+
+如果你是从本地仓库目录安装的，也可以在更新仓库后重新执行：
+
+```bash
+openclaw plugins uninstall openclaw-vault --force
+openclaw plugins install ./extensions/openclaw-vault
+openclaw vault setup
+openclaw gateway restart
+```
+
+### 配置插件
+
+插件配置位于 `~/.openclaw/openclaw.json` 的 `plugins.entries.openclaw-vault.config` 下。通常无需手动编辑，安装器和 `openclaw vault setup` 会自动补齐必要配置。
+
+如果你需要手动设置，可参考：
+
+```json5
 {
-  "plugins": {
-    "openclaw-vault": {
-      "secrets": {
-        "file": "~/my-secrets.json",
-        "enableContextRedaction": true,
-        "enableOutputSubstitution": true
+  plugins: {
+    entries: {
+      "openclaw-vault": {
+        enabled: true,
+        config: {
+          proxy_port: 19100,        // 可选，默认 19100
+          secrets_baseurls: {}      // 由 vault setup 或 /s check 自动填充
+        }
       }
     }
   }
 }
 ```
 
-### 配置项
+如果你的配置启用了 `plugins.allow` 白名单，也要确保其中包含 `openclaw-vault`；CLI 安装流程会自动处理这一点。
+
+### `openclaw vault setup` 会做什么
+
+`openclaw vault setup` 与聊天中的 `/s check` 复用同一套 Provider 接管逻辑，会自动完成以下操作：
+
+1. 将 `models.providers.<providerId>.baseUrl` 改写为本地 Vault 代理地址
+2. 将真实上游 URL 备份到 `plugins.entries.openclaw-vault.config.secrets_baseurls`
+3. 将备份同步写入插件状态文件 `vault-providers.json`
+
+如果你更习惯在聊天里操作，也可以继续使用：
+
+```text
+/s check
+```
+
+---
+
+## 使用方法
+
+### 方式一：inline 密文（即用即写）
+
+在任何会发往模型的文本中使用 `<<s:...>>` 包裹敏感内容：
+
+```text
+我的数据库密码是 <<s:mySecret123>>，请帮我写连接代码
+```
+
+- 请求发往上游前，`<<s:mySecret123>>` 被替换为类似 `<<s.xK9mP2>>` 的临时 token
+- 响应返回时，token 被还原为 `<<s:mySecret123>>`
+- **支持多行内容**：换行、空格、前导空白都会原样保留和还原
+
+```text
+<<s:第一行
+第二行
+  缩进行>>
+```
+
+### 方式二：已登记密文（预注册自动匹配）
+
+通过 `/s` 命令预先注册密文，之后请求体中出现该值时会被自动替换：
+
+| 命令 | 说明 |
+|------|------|
+| `/s add <name> <value>` | 添加密文 |
+| `/s update <name> <value>` | 更新已有密文的值 |
+| `/s remove <name>` | 移除密文 |
+| `/s list` | 查看已登记密文列表（只显示名称、长度、SHA-256 摘要） |
+| `/s check` | 检查并接管 Provider，同步代理配置 |
+| `/s help` | 显示帮助信息 |
+
+**示例**
+
+```text
+/s add db_pass mySecret123
+```
+
+之后，只要请求体中出现 `mySecret123`，Vault 就会在转发上游前把它替换为临时 token，响应中的 token 会被还原为明文 `mySecret123`（注意：已登记密文还原后是明文，不会带 `<<s:...>>` 包裹）。
+
+### 查看密文列表
+
+```text
+/s list
+```
+
+输出示例：
+
+```text
+Vault 密文列表：
+- db_pass | len=11 | sha256=a1b2c3d4e5f6
+```
+
+---
+
+## 插件配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `secrets.file` | `string` | `~/.openclaw/secrets.json` | 秘密存储文件路径（通过 `resolvePath` 解析） |
-| `secrets.enableContextRedaction` | `boolean` | `true` | 是否在 `before_prompt_build` 阶段遮蔽所有消息中的真实值 |
-| `secrets.enableOutputSubstitution` | `boolean` | `true` | 是否在 `message_sending` 阶段将 `{{NAME}}` 还原为真实值展示给用户 |
+| `proxy_port` | integer | `19100` | 本地代理监听端口（1–65535） |
+| `secrets_baseurls` | object | `{}` | Provider 真实上游 URL 映射（由 `/s check` 自动管理） |
 
-秘密文件默认位置：`~/.openclaw/secrets.json`，文件权限为 `0600`。
+配置位于 `plugins.entries.openclaw-vault.config` 下。
 
-## 项目结构
+## 插件状态文件
 
-```
-openclaw-vault/
-├── openclaw.plugin.json              # 插件清单
-├── package.json                      # 无运行时依赖
-├── index.ts                          # 入口：注册钩子/命令/工具
-└── src/
-    ├── secrets/
-    │   └── secret-store.ts           # 秘密存储：CRUD + redact/substitute + vault 标记解析
-    ├── commands/
-    │   └── secret-command.ts         # /secret add|remove|list|clear
-    ├── hooks/
-    │   ├── context-redact.ts         # before_prompt_build: 原地遮蔽 + 注入占位符列表
-    │   ├── tool-call-sub.ts          # before_tool_call: {{NAME}} → 真实值
-    │   ├── tool-result-redact.ts     # tool_result_persist: 提取标记 + 遮蔽结果
-    │   ├── message-write-redact.ts   # before_message_write: JSONL 安全网
-    │   └── message-sending-sub.ts    # message_sending: {{NAME}} → 真实值（用户展示）
-    └── tools/
-        └── resolve-placeholder.ts    # AI 工具：查询占位符是否存在
-```
+插件在自身状态目录下维护两个 JSON 文件：
 
-## 安全说明
+| 文件 | 用途 |
+|------|------|
+| `vault-secrets.json` | 已登记密文的名称和值 |
+| `vault-providers.json` | Provider 原始 baseUrl 备份 |
 
-### AI 能看到什么？
+---
 
-在硬遮蔽架构下，AI 全程只能看到：
-- `{{API_KEY}}`
-- `{{DB_PASSWORD}}`
-- `{{SSH_HOST}}`
+## 能力边界
 
-真实值 `sk-abcdef1234567890`、`hunter2`、`192.168.1.100` 对 AI 完全不可见。
+### 这是什么
 
-### 与旧版"软约束"的区别
+- 本地 HTTP 代理 + 临时随机 token 替换 + 响应还原
+- 目标是**让敏感原文不出现在发往 AI Provider 的请求中**
 
-| 对比项 | 旧版（软约束） | 新版（硬遮蔽） |
-|--------|---------------|---------------|
-| 方式 | 通过 prompt 告诉 AI "不要暴露" | 在数据层面替换，AI 物理上看不到 |
-| 可靠性 | AI 可能忽略指令泄露真实值 | 100% 不可能泄露（值已被替换） |
-| 覆盖范围 | 仅靠 AI 自觉 | 所有消息、工具结果、持久化文件 |
-| JSONL 安全 | 真实值可能写入历史 | `before_message_write` 确保不写入 |
+### 生效条件
 
-### 已知限制
+- 只有经过 Vault 代理的 provider 请求才会被脱敏/还原
+- 未被 `/s check` 接管的 provider，或绕过代理的直接请求，不受保护
+- 代理默认监听 `127.0.0.1`，仅本机可访问
 
-- `redact()` 默认不替换长度小于 4 的秘密值，以避免误伤常见短字符串
-- 脱敏按值长度从长到短替换，降低子串重叠导致的错误匹配
-- 如果某个真实值恰好是另一个占位符的子串，可能产生非预期替换（极少见）
+### 还原限制
 
-## 验证清单
+- **还原依赖 token 在响应中原样存在**：如果 AI 模型改写、拆分、删除了 token，则无法还原
+- 这是 token 替换方案的固有限制，对单行和多行内容均适用
 
-1. `/secret add API_KEY sk-test123` — 注册秘密
-2. 发送包含 `sk-test123` 的消息 → 确认 AI 回复中只出现 `{{API_KEY}}`
-3. 让 AI 调用工具（参数含 `{{API_KEY}}`）→ 确认工具收到 `sk-test123`
-4. 工具返回包含 `sk-test123` 的结果 → 确认 AI 只看到 `{{API_KEY}}`
-5. 工具返回 `<<VAULT:TOKEN=new-secret>>` 标记 → 确认 `TOKEN` 被注册且 AI 只看到 `{{TOKEN}}`
-6. 检查 JSONL 文件 → 确认持久化内容不含任何真实值
+### 大文件 / 部分读取边界
 
-## License
+- Vault **只处理实际到达代理的请求体内容**，不会参与宿主或工具在代理之前进行的文件部分读取、裁剪、摘要或截断
+- 如果 `read` 等工具因为文件过大只发送部分内容，而截断恰好发生在敏感片段内部，可能会破坏 `<<s:...>>` 的完整边界，或把已登记密文拆成不连续片段
+- 当前请求侧替换不会跨“宿主已经截断/分段后的边界”重新拼接匹配；只有在最终请求体中**完整出现**的 inline 密文或已登记密文才会被替换
+- 因此，大文件场景下如果敏感内容依赖完整结构才能识别，宿主先读一部分再发给模型时，残留的原文片段可能不会被转换
 
-MIT
+### 内容格式
+
+- 请求体和响应体均按 **UTF-8 文本** 处理
+- 已覆盖：普通 HTTP JSON 响应、SSE 流式响应（含 OpenAI Responses 和 Anthropic Messages 协议）
+- 未覆盖：二进制 payload、非文本编码的请求/响应
+
+### inline 密文 vs 已登记密文
+
+| | inline `<<s:...>>` | 已登记密文（`/s add`） |
+|---|---|---|
+| 多行支持 | 支持 | 不支持（必须单行） |
+| 空值处理 | `<<s:>>` 保留原样，不替换 | 空值会被拒绝 |
+| 还原后格式 | `<<s:原文>>` | 明文值 |
+| 名称要求 | 无 | 名称不能为空、不能含空白字符 |
+
+### `/s add` 命令的留痕风险
+
+- `/s add db_pass mySecret123` 这条命令本身可能出现在宿主聊天记录、转录或日志中
+- 建议只用于登记临时测试密文，或你已接受其暴露范围的内容
+
+### 请求超时
+
+- 代理转发上游请求默认超时 30 秒；超时后请求会被中止并返回 502 错误
+
+---
+
+## 适用场景
+
+**适合**
+
+- 希望在发往模型前，把 prompt 中的敏感片段替换成临时 token
+- 希望尽量避免真实敏感值直接出现在上游 AI Provider 请求中
+- 使用 OpenClaw 的 provider HTTP / SSE 链路，且接受本地代理方式
+
+**不适合**
+
+- 需要端到端加密或密钥托管能力
+- 需要宿主侧聊天记录、命令记录、日志完全不出现敏感内容
+- 核心数据是二进制 payload 而非文本 / JSON / SSE
