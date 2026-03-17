@@ -84,7 +84,7 @@ function shellQuote(value) {
 
 function execCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(isWindows() ? "cmd.exe" : command, isWindows() ? ["/d", "/s", "/c", command, ...args] : args, {
       stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
       shell: false,
       env: options.env ?? process.env,
